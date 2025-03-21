@@ -5,8 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IMRTCollection {
     enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
@@ -18,7 +17,6 @@ interface IMRTCollection {
  * @dev Staking contract for MRT NFTs
  */
 contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
-    using SafeMath for uint256;
     
     // NFT Collection contract
     IERC721 public nftCollection;
@@ -129,7 +127,7 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
      */
     function addRewards(uint256 amount) external {
         require(mrtToken.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
-        rewardsPool = rewardsPool.add(amount);
+        rewardsPool = rewardsPool + amount;
         emit RewardsAdded(amount);
     }
     
@@ -150,8 +148,8 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
             ? stakingInfo.lastClaimTimestamp 
             : stakingInfo.stakedTimestamp;
             
-        uint256 stakingDuration = claimTimestamp.sub(stakingInfo.stakedTimestamp);
-        uint256 claimDuration = claimTimestamp.sub(lastClaimTime);
+        uint256 stakingDuration = claimTimestamp - stakingInfo.stakedTimestamp;
+        uint256 claimDuration = claimTimestamp - lastClaimTime;
         
         if (claimDuration == 0) {
             return 0;
@@ -173,7 +171,7 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
         
         // Calculate rewards: (daily reward * days * multiplier / 10000)
         uint256 daysStaked = claimDuration / 1 days;
-        uint256 reward = rewardRate.mul(daysStaked).mul(multiplier).div(10000);
+        uint256 reward = rewardRate * daysStaked * multiplier / 10000;
         
         return reward;
     }
@@ -235,7 +233,7 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
         
         // Transfer rewards if any
         if (reward > 0 && reward <= rewardsPool) {
-            rewardsPool = rewardsPool.sub(reward);
+            rewardsPool = rewardsPool - reward;
             require(mrtToken.transfer(msg.sender, reward), "Reward transfer failed");
             emit RewardsClaimed(msg.sender, tokenId, reward);
         }
@@ -262,7 +260,7 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
         stakingInfo.lastClaimTimestamp = block.timestamp;
         
         // Transfer rewards
-        rewardsPool = rewardsPool.sub(reward);
+        rewardsPool = rewardsPool - reward;
         require(mrtToken.transfer(msg.sender, reward), "Reward transfer failed");
         
         emit RewardsClaimed(msg.sender, tokenId, reward);
@@ -280,7 +278,6 @@ contract MRTStaking is Ownable, ERC721Holder, ReentrancyGuard {
     /**
      * @dev Get staking info for a token
      * @param tokenId The token ID
-     * @return Staking info (stakedTimestamp, lastClaimTimestamp, owner, isStaked)
      */
     function getStakingInfo(uint256 tokenId) external view returns (
         uint256 stakedTimestamp,

@@ -4,50 +4,41 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "@openzeppelin/contracts/token/common/ERC2981.sol";
 
 /**
  * @title MRTCollection
- * @dev Main NFT contract with burning mechanism
+ * @dev Main NFT contract with burning mechanism and team tax allocation
  */
-contract MRTCollection is ERC721Enumerable, ERC721URIStorage, Ownable {
-    using Counters for Counters.Counter;
-    using SafeMath for uint256;
-
-    // Token counter
-    Counters.Counter private _tokenIdCounter;
+contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {    
+    // Simple counter replacement
+    uint256 private _currentTokenId;
     
     // Maximum supply
-    uint256 public constant MAX_SUPPLY = 10000;
-    
+    uint256 public maxSupply = 10000;
+        
     // Base URI for metadata
     string private _baseTokenURI;
     
     // MRT token address
     IERC20 public mrtToken;
-    
-    // Burn rates
-    uint256 public burnRateTransfer = 1; // 1% burn on transfer
-    uint256 public burnRateMint = 3;     // 3% burn on mint
-    
-    // Royalty fee
-    uint256 public royaltyFee = 7; // 7% royalty on secondary sales
-    
-    // Fee receivers
-    address public stakingContract;
-    address public daoContract;
-    address public treasuryWallet;
-    
-    // Fee distribution
-    uint256 public stakingShare = 2;  // 2% to staking rewards
-    uint256 public communityShare = 1; // 1% to community fund (DAO)
-    uint256 public devShare = 1;      // 1% to development fund
 
+    // Fee receivers & contract addresses
+    address public daoContract; // DAO address also serves as treasury
+    address public trustedOracle; // For off-chain randomness verification
+    
     // Rarity levels
     enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
     mapping(uint256 => Rarity) public tokenRarity;
+    
+    // Mapping to store tokenURI for each rarity level
+    mapping(Rarity => string) public rarityToURI;
+    
+    // TokenURI mapping (predefined)
+    mapping(uint256 => string) private _tokenURIs;
     
     // Presale contract
     address public presaleContract;
@@ -55,8 +46,10 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, Ownable {
     // Events
     event Minted(address indexed to, uint256 indexed tokenId, Rarity rarity);
     event TokensBurned(uint256 indexed tokenId);
-    event RoyaltyPaid(address indexed seller, address indexed buyer, uint256 tokenId, uint256 amount);
     event ContractAddressUpdated(string indexed contractType, address indexed contractAddress);
+    event ReducingNumberUpdated(uint256 oldValue, uint256 newValue);
+    event RaritySet(uint256 indexed tokenId, Rarity rarity);
+    event RarityURISet(Rarity indexed rarity, string tokenURI);
     
     /**
      * @dev Constructor
@@ -64,20 +57,41 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, Ownable {
      * @param symbol_ The symbol of the NFT collection
      * @param baseTokenURI_ The base URI for token metadata
      * @param mrtTokenAddress The address of the MRT token contract
-     * @param treasury The treasury wallet address
+     * @param _trustedOracle The trusted oracle address for randomness verification
+     * @param _daoContract The DAO contract address (also serves as treasury)
+     * @param _royaltyPercentage The royalty percentage (between 5-10%)
      */
     constructor(
         string memory name_,
         string memory symbol_,
         string memory baseTokenURI_,
         address mrtTokenAddress,
-        address treasury
+        address _trustedOracle,
+        address _daoContract,
+        uint96 _royaltyPercentage
     ) ERC721(name_, symbol_) Ownable(msg.sender) {
         _baseTokenURI = baseTokenURI_;
         mrtToken = IERC20(mrtTokenAddress);
-        treasuryWallet = treasury;
+        trustedOracle = _trustedOracle;
+        
+        require(_daoContract != address(0), "DAO address cannot be zero");
+        require(_royaltyPercentage >= 500 && _royaltyPercentage <= 1000, "Royalty must be between 5-10%");
+        
+        daoContract = _daoContract;
+        _setDefaultRoyalty(_daoContract, _royaltyPercentage);
     }
     
+    /**
+     * @dev Get available supply
+     * @return The number of tokens still available for minting
+     */
+    function getAvailableSupply() public view returns (uint256) {
+        if (_currentTokenId >= maxSupply) {
+            return 0;
+        }
+        return maxSupply - _currentTokenId;
+    }
+        
     /**
      * @dev Override _baseURI to return our base token URI
      */
@@ -96,160 +110,164 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, Ownable {
     /**
      * @dev Set the contract addresses for the ecosystem
      * @param _presaleContract Address of the presale contract
-     * @param _stakingContract Address of the staking contract
-     * @param _daoContract Address of the DAO contract
+     * @param _daoContract Address of the DAO contract (also serves as treasury)
      */
     function setContractAddresses(
         address _presaleContract,
-        address _stakingContract,
         address _daoContract
     ) external onlyOwner {
-        presaleContract = _presaleContract;
-        stakingContract = _stakingContract;
+        presaleContract = _presaleContract;        
+        require(_daoContract != address(0), "DAO address cannot be zero");
         daoContract = _daoContract;
         
+        // Update royalty receiver to the new DAO address
+        (address receiver, uint256 royaltyAmount) = royaltyInfo(0, 10000);
+        _setDefaultRoyalty(_daoContract, uint96(royaltyAmount));
+        
         emit ContractAddressUpdated("Presale", _presaleContract);
-        emit ContractAddressUpdated("Staking", _stakingContract);
         emit ContractAddressUpdated("DAO", _daoContract);
     }
     
     /**
-     * @dev Update fee distribution
-     * @param _stakingShare Percentage for staking rewards
-     * @param _communityShare Percentage for community fund
-     * @param _devShare Percentage for development fund
+     * @dev Update trusted oracle address
+     * @param _trustedOracle New trusted oracle address
      */
-    function updateFeeDistribution(
-        uint256 _stakingShare,
-        uint256 _communityShare,
-        uint256 _devShare
-    ) external onlyOwner {
-        require(_stakingShare + _communityShare + _devShare <= 10, "Total fees cannot exceed 10%");
-        stakingShare = _stakingShare;
-        communityShare = _communityShare;
-        devShare = _devShare;
-    }
-    
-    /**
-     * @dev Update burn rates
-     * @param _burnRateTransfer New burn rate for transfers
-     * @param _burnRateMint New burn rate for minting
-     */
-    function updateBurnRates(uint256 _burnRateTransfer, uint256 _burnRateMint) external onlyOwner {
-        require(_burnRateTransfer <= 5, "Transfer burn rate too high");
-        require(_burnRateMint <= 10, "Mint burn rate too high");
-        burnRateTransfer = _burnRateTransfer;
-        burnRateMint = _burnRateMint;
-    }
-    
-    /**
-     * @dev Update royalty fee
-     * @param _royaltyFee New royalty fee percentage
-     */
-    function updateRoyaltyFee(uint256 _royaltyFee) external onlyOwner {
-        require(_royaltyFee <= 10, "Royalty fee too high");
-        royaltyFee = _royaltyFee;
+    function updateTrustedOracle(address _trustedOracle) external onlyOwner {
+        trustedOracle = _trustedOracle;
     }
 
     /**
-     * @dev Generate random rarity for NFT
-     * @param tokenId The token ID
-     * @param minter The address of the minter
-     * @return The rarity of the NFT
+     * @dev Set tokenURI for a specific rarity level
+     * @param rarity The rarity level
+     * @param _tokenURI The URI for the rarity level
      */
-    function _generateRarity(uint256 tokenId, address minter) internal view returns (Rarity) {
-        uint256 randomNumber = uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            minter,
-            tokenId
-        ))) % 100;
-        
-        // Rarity distribution: 50% Common, 30% Uncommon, 15% Rare, 4% Epic, 1% Legendary
-        if (randomNumber < 50) {
-            return Rarity.COMMON;
-        } else if (randomNumber < 80) {
-            return Rarity.UNCOMMON;
-        } else if (randomNumber < 95) {
-            return Rarity.RARE;
-        } else if (randomNumber < 99) {
-            return Rarity.EPIC;
-        } else {
-            return Rarity.LEGENDARY;
-        }
+    function setRarityURI(Rarity rarity, string memory _tokenURI) external onlyOwner {
+        rarityToURI[rarity] = _tokenURI;
+        emit RarityURISet(rarity, _tokenURI);
     }
-    
+
+    /**
+     * @dev Set the default royalty for all NFTs
+     * @param _royaltyPercentage The royalty percentage (between 5-10%)
+     */
+    function setDefaultRoyalty(uint96 _royaltyPercentage) external onlyOwner {
+        require(_royaltyPercentage >= 500 && _royaltyPercentage <= 1000, "Royalty must be between 5-10%");
+        require(daoContract != address(0), "DAO address not set");
+        
+        // ERC2981 uses basis points (1/100 of a percent)
+        // 500 = 5%, 1000 = 10%
+        _setDefaultRoyalty(daoContract, _royaltyPercentage);
+    }
+
     /**
      * @dev Internal mint function - only callable by authorized contracts
      * @param to The address to mint the NFT to
-     * @param tokenURI The URI for the token metadata
+     * @param signature The signature from trusted oracle that contains rarity information
      */
-    function mintInternal(address to, string memory tokenURI) external returns (uint256) {
+    function mintInternal(address to, bytes memory signature) external returns (uint256) {
         require(
             msg.sender == owner() || 
             msg.sender == presaleContract, 
             "Caller is not authorized to mint"
         );
-        require(_tokenIdCounter.current() < MAX_SUPPLY, "Max supply exceeded");
         
-        uint256 tokenId = _tokenIdCounter.current();
-        _tokenIdCounter.increment();
+        // Check if minting is still possible with the reducing number
+        require(_currentTokenId < maxSupply, "Max supply reached");
         
-        // Assign rarity
-        Rarity rarity = _generateRarity(tokenId, to);
-        tokenRarity[tokenId] = rarity;
-        
+        uint256 tokenId = _currentTokenId;
+        _currentTokenId++;
+
+        // Reduce max supply by 1 with each mint
+        maxSupply--;
+
         // Mint the NFT
         _safeMint(to, tokenId);
-        _setTokenURI(tokenId, tokenURI);
         
-        // Calculate burn amount for minting
-        if (burnRateMint > 0) {
-            // We don't actually burn NFTs here, but this would be the implementation
-            // Could be a separate burn event that reduces total supply
-            emit TokensBurned(tokenId);
-        }
+        // Extract rarity from signature
+        (Rarity rarity, address signer) = verifyAndExtractRarity(tokenId, signature);
+        
+        // Verify the signer is our trusted oracle
+        require(signer == trustedOracle, "Invalid signature");
+        
+        // Set the token URI based on rarity
+        string memory tokenUriForRarity = rarityToURI[rarity];
+        require(bytes(tokenUriForRarity).length > 0, "URI not set for this rarity");
+        _setTokenURI(tokenId, tokenUriForRarity);
+        
+        // Set the rarity
+        tokenRarity[tokenId] = rarity;
+        emit RaritySet(tokenId, rarity);
         
         emit Minted(to, tokenId, rarity);
         
         return tokenId;
     }
     
+
     /**
-     * @dev Execute burn event for special occasions
-     * @param tokenIds Array of token IDs to burn
+     * @dev Helper function to verify and extract rarity from signature
+     * @param tokenId The token ID
+     * @param signature The signature from trusted oracle
+     * @return rarity The extracted rarity
+     * @return signer The address that signed the message
      */
-    function executeBurnEvent(uint256[] calldata tokenIds) external onlyOwner {
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            require(_exists(tokenIds[i]), "Token does not exist");
-            _burn(tokenIds[i]);
-            emit TokensBurned(tokenIds[i]);
+    function verifyAndExtractRarity(uint256 tokenId, bytes memory signature) internal pure returns (Rarity rarity, address signer) {
+        // The first byte of the signature contains the rarity value (0-4)
+        require(signature.length > 65, "Signature too short");
+        
+        // Extract rarity from the first byte
+        rarity = Rarity(uint8(signature[0]));
+        require(uint8(rarity) <= uint8(Rarity.LEGENDARY), "Invalid rarity value");
+        
+        // Extract the actual signature (skip the first byte)
+        bytes memory actualSignature = new bytes(65);
+        for (uint i = 0; i < 65; i++) {
+            actualSignature[i] = signature[i + 1];
         }
+        
+        // Verify the signature
+        bytes32 messageHash = keccak256(abi.encodePacked(tokenId, uint8(rarity)));
+        bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
+        signer = ECDSA.recover(ethSignedMessageHash, actualSignature);
+        
+        return (rarity, signer);
+    }
+    /**
+     * @dev Reduce the maximum supply if there's enough available supply
+     * @param reductionAmount Amount to reduce the max supply by
+     * @return Whether the reduction was successful
+     */
+    function reduceMaxSupply(uint256 reductionAmount) external returns (bool) {
+        require(msg.sender == owner() || msg.sender == daoContract, "Only owner or DAO can reduce max supply");
+        
+        // Check if there's enough available supply to reduce
+        uint256 availableSupply = getAvailableSupply();
+        require(availableSupply >= reductionAmount, "Not enough available supply to reduce");
+        
+        // Reduce the max supply
+        maxSupply -= reductionAmount;
+                
+        return true;
+    }
+
+    /**
+     * @dev Get the current token ID
+     */
+    function getCurrentTokenId() external view returns (uint256) {
+        return _currentTokenId;
     }
     
     /**
-     * @dev Override _transfer to implement burn on transfer
+     * @dev Check if a token exists
+     * @param tokenId The token ID to check
+     * @return Whether the token exists
      */
-    function _transfer(address from, address to, uint256 tokenId) internal override {
-        super._transfer(from, to, tokenId);
-        
-        // Implement royalty payment on secondary sales
-        if (from != address(0) && to != address(0) && from != owner() && to != owner()) {
-            // This would be implemented in a marketplace contract typically
-            // Here we just emit the event for demonstration
-            uint256 royaltyAmount = 0; // Would be calculated based on sale price
-            emit RoyaltyPaid(from, to, tokenId, royaltyAmount);
-            
-            // Distribute fees
-            // In real implementation, this would transfer actual funds
-            // stakingContract.receive{value: stakingShare}();
-            // daoContract.receive{value: communityShare}();
-            // treasuryWallet.receive{value: devShare}();
-        }
+    function _exists(uint256 tokenId) internal view returns (bool) {
+        return _ownerOf(tokenId) != address(0);
     }
     
     // Required overrides for ERC721URIStorage and ERC721Enumerable
-    function _burn(uint256 tokenId) internal override(ERC721, ERC721URIStorage) {
+    function _burn(uint256 tokenId) internal override(ERC721) {
         super._burn(tokenId);
     }
     
@@ -257,8 +275,8 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, Ownable {
         return super.tokenURI(tokenId);
     }
     
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721Enumerable, ERC721URIStorage) returns (bool) {
-        return super.supportsInterface(interfaceId);
+    function supportsInterface(bytes4 interfaceId) public view override(ERC721Enumerable, ERC721URIStorage, ERC2981) returns (bool) {
+        return super.supportsInterface(interfaceId) || ERC2981.supportsInterface(interfaceId);
     }
     
     function _update(address to, uint256 tokenId, address auth) internal override(ERC721, ERC721Enumerable) returns (address) {

@@ -4,28 +4,40 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IMRTCollection {
     enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
     function tokenRarity(uint256 tokenId) external view returns (Rarity);
     function balanceOf(address owner) external view returns (uint256);
     function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256);
+    function reduceMaxSupply(uint256 reductionAmount) external returns (bool);
+    function getAvailableSupply() external view returns (uint256);
+}
+
+interface IMRTStaking {
+    function getUserStakedTokens(address user) external view returns (uint256[] memory);
+    function getStakingInfo(uint256 tokenId) external view returns (
+        uint256 stakedTimestamp,
+        uint256 lastClaimTimestamp,
+        address owner,
+        bool isStaked
+    );
 }
 
 /**
  * @title MRTDAO
  * @dev DAO governance contract for MRT ecosystem
  */
-contract MRTDAO is Ownable, ReentrancyGuard {
-    using SafeMath for uint256;
-    
+contract MRTDAO is Ownable, ReentrancyGuard {  
     // NFT Collection contract
     IMRTCollection public nftCollection;
     
     // MRT token
     IERC20 public mrtToken;
+    
+    // Staking contract
+    IMRTStaking public stakingContract;
     
     // Proposal struct
     struct Proposal {
@@ -45,8 +57,17 @@ contract MRTDAO is Ownable, ReentrancyGuard {
         mapping(address => bool) voteDirection; // true = for, false = against
     }
     
+    // Proposal types
+    enum ProposalType { STANDARD, ONCHAIN }
+    
+    // Extended proposal data
+    struct ProposalData {
+        ProposalType proposalType;
+    }
+    
     // Proposal mapping and counter
     mapping(uint256 => Proposal) public proposals;
+    mapping(uint256 => ProposalData) public proposalData;
     uint256 public proposalCount;
     
     // Voting parameters
@@ -54,39 +75,53 @@ contract MRTDAO is Ownable, ReentrancyGuard {
     uint256 public executionDelay = 2 days;
     uint256 public minProposalThreshold = 100 * 10**18; // 100 MRT tokens
     
-    // Voting power tiers for NFTs based on rarity
-    mapping(IMRTCollection.Rarity => uint256) public nftVotingPower;
+    // Voting power multipliers for NFTs based on rarity
+    mapping(IMRTCollection.Rarity => uint256) public nftVotingPowerMultiplier;
     
     // Community fund
     uint256 public communityFund;
     
     // Events
-    event ProposalCreated(uint256 indexed proposalId, string title, address proposer);
+    event ProposalCreated(uint256 indexed proposalId, string title, address proposer, ProposalType proposalType);
     event Voted(uint256 indexed proposalId, address voter, bool support, uint256 votingPower);
     event ProposalExecuted(uint256 indexed proposalId);
     event FundsAdded(uint256 amount);
     event FundsWithdrawn(address recipient, uint256 amount);
     event VotingParametersUpdated(uint256 votingPeriod, uint256 executionDelay, uint256 minProposalThreshold);
-    event NFTVotingPowerUpdated(uint256[] votingPowers);
+    event NFTVotingPowerUpdated(uint256[] votingPowerMultipliers);
+    event MaxSupplyReduced(uint256 reductionAmount);
+    event StakingContractUpdated(address stakingContract);
     
     /**
      * @dev Constructor
      * @param nftCollectionAddress The address of the NFT collection contract
      * @param mrtTokenAddress The address of the MRT token contract
+     * @param stakingContractAddress The address of the staking contract
      */
     constructor(
         address nftCollectionAddress,
-        address mrtTokenAddress
+        address mrtTokenAddress,
+        address stakingContractAddress
     ) Ownable(msg.sender) {
         nftCollection = IMRTCollection(nftCollectionAddress);
         mrtToken = IERC20(mrtTokenAddress);
+        stakingContract = IMRTStaking(stakingContractAddress);
         
-        // Set initial voting power for NFTs based on rarity
-        nftVotingPower[IMRTCollection.Rarity.COMMON] = 1;
-        nftVotingPower[IMRTCollection.Rarity.UNCOMMON] = 2;
-        nftVotingPower[IMRTCollection.Rarity.RARE] = 5;
-        nftVotingPower[IMRTCollection.Rarity.EPIC] = 10;
-        nftVotingPower[IMRTCollection.Rarity.LEGENDARY] = 25;
+        // Set initial voting power multipliers for NFTs based on rarity
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.COMMON] = 10000; // 1.0x (10000 = 100%)
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.UNCOMMON] = 20000; // 2.0x
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.RARE] = 50000; // 5.0x
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.EPIC] = 100000; // 10.0x
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.LEGENDARY] = 250000; // 25.0x
+    }
+    
+    /**
+     * @dev Update staking contract address
+     * @param _stakingContractAddress New staking contract address
+     */
+    function updateStakingContract(address _stakingContractAddress) external onlyOwner {
+        stakingContract = IMRTStaking(_stakingContractAddress);
+        emit StakingContractUpdated(_stakingContractAddress);
     }
     
     /**
@@ -108,26 +143,26 @@ contract MRTDAO is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Update NFT voting power tiers
-     * @param votingPowers Array of voting powers [COMMON, UNCOMMON, RARE, EPIC, LEGENDARY]
+     * @dev Update NFT voting power multipliers
+     * @param votingPowerMultipliers Array of voting power multipliers [COMMON, UNCOMMON, RARE, EPIC, LEGENDARY]
      */
-    function updateNFTVotingPower(uint256[] calldata votingPowers) external onlyOwner {
-        require(votingPowers.length == 5, "Invalid array length");
+    function updateNFTVotingPower(uint256[] calldata votingPowerMultipliers) external onlyOwner {
+        require(votingPowerMultipliers.length == 5, "Invalid array length");
         
-        nftVotingPower[IMRTCollection.Rarity.COMMON] = votingPowers[0];
-        nftVotingPower[IMRTCollection.Rarity.UNCOMMON] = votingPowers[1];
-        nftVotingPower[IMRTCollection.Rarity.RARE] = votingPowers[2];
-        nftVotingPower[IMRTCollection.Rarity.EPIC] = votingPowers[3];
-        nftVotingPower[IMRTCollection.Rarity.LEGENDARY] = votingPowers[4];
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.COMMON] = votingPowerMultipliers[0];
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.UNCOMMON] = votingPowerMultipliers[1];
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.RARE] = votingPowerMultipliers[2];
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.EPIC] = votingPowerMultipliers[3];
+        nftVotingPowerMultiplier[IMRTCollection.Rarity.LEGENDARY] = votingPowerMultipliers[4];
         
-        emit NFTVotingPowerUpdated(votingPowers);
+        emit NFTVotingPowerUpdated(votingPowerMultipliers);
     }
     
     /**
      * @dev Add funds to community treasury
      */
     function addFunds() external payable {
-        communityFund = communityFund.add(msg.value);
+        communityFund = communityFund + msg.value;
         emit FundsAdded(msg.value);
     }
     
@@ -146,37 +181,66 @@ contract MRTDAO is Ownable, ReentrancyGuard {
      * @return The total voting power
      */
     function calculateVotingPower(address voter) public view returns (uint256) {
-        // Voting power from MRT tokens
-        uint256 tokenVotingPower = mrtToken.balanceOf(voter).div(10**18); // 1 token = 1 vote
+        // Get token balance
+        uint256 tokenBalance = mrtToken.balanceOf(voter) / 10**18; // Convert to whole tokens
         
-        // Voting power from NFTs
+        // Return 0 if no tokens
+        if (tokenBalance == 0) {
+            return 0;
+        }
+        
+        // Calculate NFT multiplier from NFTs in wallet
+        uint256 totalMultiplier = 10000; // Base multiplier of 1.0x (100%)
+        
+        // Add multiplier from wallet NFTs
         uint256 nftCount = nftCollection.balanceOf(voter);
-        uint256 nftVotingPowerTotal = 0;
-        
         for (uint256 i = 0; i < nftCount; i++) {
             uint256 tokenId = nftCollection.tokenOfOwnerByIndex(voter, i);
             IMRTCollection.Rarity rarity = nftCollection.tokenRarity(tokenId);
-            nftVotingPowerTotal = nftVotingPowerTotal.add(nftVotingPower[rarity]);
+            totalMultiplier += nftVotingPowerMultiplier[rarity]; // Add the bonus part of the multiplier
         }
         
-        return tokenVotingPower.add(nftVotingPowerTotal);
+        // Add multiplier from staked NFTs
+        uint256[] memory stakedTokens = stakingContract.getUserStakedTokens(voter);
+        for (uint256 i = 0; i < stakedTokens.length; i++) {
+            uint256 tokenId = stakedTokens[i];
+            
+            // Verify the token is still staked and owned by the voter
+            (,, address owner, bool isStaked) = stakingContract.getStakingInfo(tokenId);
+            
+            if (isStaked && owner == voter) {
+                IMRTCollection.Rarity rarity = nftCollection.tokenRarity(tokenId);
+                totalMultiplier += nftVotingPowerMultiplier[rarity]; // Add the bonus part of the multiplier
+            }
+        }
+        
+        // Apply multiplier to token balance
+        return (tokenBalance * totalMultiplier) / 10000;
     }
     
     /**
-     * @dev Create a new proposal
+     * @dev Create a new proposal (standard or on-chain)
      * @param title Proposal title
      * @param description Proposal description
-     * @param targetContract Contract to call if proposal passes
-     * @param callData Function call data for execution
+     * @param proposalType Type of proposal (STANDARD or ONCHAIN)
+     * @param targetContract Contract to call if proposal passes (only for ONCHAIN proposals)
+     * @param callData Function call data for execution (only for ONCHAIN proposals)
      */
     function createProposal(
         string memory title,
         string memory description,
+        ProposalType proposalType,
         address targetContract,
         bytes memory callData
     ) external nonReentrant {
         uint256 votingPower = calculateVotingPower(msg.sender);
         require(votingPower >= minProposalThreshold, "Insufficient voting power to create proposal");
+        
+        // For on-chain proposals, require callData and targetContract
+        if (proposalType == ProposalType.ONCHAIN) {
+            require(targetContract != address(0), "Target contract cannot be zero address");
+            require(callData.length > 0, "Call data cannot be empty for on-chain proposals");
+        }
         
         uint256 proposalId = proposalCount++;
         Proposal storage proposal = proposals[proposalId];
@@ -184,13 +248,20 @@ contract MRTDAO is Ownable, ReentrancyGuard {
         proposal.title = title;
         proposal.description = description;
         proposal.startTime = block.timestamp;
-        proposal.endTime = block.timestamp.add(votingPeriod);
+        proposal.endTime = block.timestamp + votingPeriod;
         proposal.proposer = msg.sender;
         proposal.executed = false;
-        proposal.callData = callData;
-        proposal.targetContract = targetContract;
         
-        emit ProposalCreated(proposalId, title, msg.sender);
+        // Only set callData and targetContract for on-chain proposals
+        if (proposalType == ProposalType.ONCHAIN) {
+            proposal.callData = callData;
+            proposal.targetContract = targetContract;
+        }
+        
+        // Set proposal type
+        proposalData[proposalId].proposalType = proposalType;
+        
+        emit ProposalCreated(proposalId, title, msg.sender, proposalType);
     }
     
     /**
@@ -214,9 +285,9 @@ contract MRTDAO is Ownable, ReentrancyGuard {
         proposal.voteDirection[msg.sender] = support;
         
         if (support) {
-            proposal.forVotes = proposal.forVotes.add(votingPower);
+            proposal.forVotes = proposal.forVotes + votingPower;
         } else {
-            proposal.againstVotes = proposal.againstVotes.add(votingPower);
+            proposal.againstVotes = proposal.againstVotes + votingPower;
         }
         
         emit Voted(proposalId, msg.sender, support, votingPower);
@@ -228,17 +299,21 @@ contract MRTDAO is Ownable, ReentrancyGuard {
      */
     function executeProposal(uint256 proposalId) external nonReentrant {
         Proposal storage proposal = proposals[proposalId];
+        ProposalData storage data = proposalData[proposalId];
         
         require(block.timestamp > proposal.endTime, "Voting still in progress");
-        require(block.timestamp <= proposal.endTime.add(executionDelay), "Execution window passed");
+        require(block.timestamp <= proposal.endTime + executionDelay, "Execution window passed");
         require(!proposal.executed, "Proposal already executed");
         require(proposal.forVotes > proposal.againstVotes, "Proposal did not pass");
         
         proposal.executed = true;
         
-        // Execute the proposal
-        (bool success, ) = proposal.targetContract.call(proposal.callData);
-        require(success, "Proposal execution failed");
+        // For on-chain proposals, execute the call
+        if (data.proposalType == ProposalType.ONCHAIN) {
+            // Execute the proposal
+            (bool success, ) = proposal.targetContract.call(proposal.callData);
+            require(success, "Proposal execution failed");
+        }
         
         emit ProposalExecuted(proposalId);
     }
@@ -248,13 +323,10 @@ contract MRTDAO is Ownable, ReentrancyGuard {
      * @param recipient Recipient of the funds
      * @param amount Amount to withdraw
      */
-    function withdrawFunds(address payable recipient, uint256 amount) external {
-        // This function would typically be restricted to be called through a proposal
-        // For simplicity, we're allowing owner access here
-        require(msg.sender == owner(), "Only callable through proposal execution");
+    function withdrawFunds(address payable recipient, uint256 amount) internal {
         require(amount <= communityFund, "Insufficient funds");
         
-        communityFund = communityFund.sub(amount);
+        communityFund = communityFund - amount;
         recipient.transfer(amount);
         
         emit FundsWithdrawn(recipient, amount);
@@ -265,19 +337,28 @@ contract MRTDAO is Ownable, ReentrancyGuard {
      * @param recipient Recipient of the tokens
      * @param amount Amount to withdraw
      */
-    function withdrawTokens(address recipient, uint256 amount) external {
-        // This function would typically be restricted to be called through a proposal
-        // For simplicity, we're allowing owner access here
-        require(msg.sender == owner(), "Only callable through proposal execution");
+    function withdrawTokens(address recipient, uint256 amount) internal {
         require(mrtToken.transfer(recipient, amount), "Token transfer failed");
         
         emit FundsWithdrawn(recipient, amount);
     }
     
     /**
+     * @dev Reduce max supply of the NFT collection (requires DAO proposal)
+     * @param reductionAmount Amount to reduce max supply by
+     */
+    function reduceMaxSupply(uint256 reductionAmount) internal returns (bool) {
+        // Call the NFT collection contract to reduce max supply
+        bool success = nftCollection.reduceMaxSupply(reductionAmount);
+        require(success, "Max supply reduction failed");
+        
+        emit MaxSupplyReduced(reductionAmount);
+        return true;
+    }
+    
+    /**
      * @dev Get proposal details
      * @param proposalId The ID of the proposal
-     * @return title, description, startTime, endTime, proposer, executed, forVotes, againstVotes
      */
     function getProposalDetails(uint256 proposalId) external view returns (
         string memory title,
@@ -287,9 +368,12 @@ contract MRTDAO is Ownable, ReentrancyGuard {
         address proposer,
         bool executed,
         uint256 forVotes,
-        uint256 againstVotes
+        uint256 againstVotes,
+        ProposalType proposalType
     ) {
         Proposal storage proposal = proposals[proposalId];
+        ProposalData storage data = proposalData[proposalId];
+        
         return (
             proposal.title,
             proposal.description,
@@ -298,7 +382,8 @@ contract MRTDAO is Ownable, ReentrancyGuard {
             proposal.proposer,
             proposal.executed,
             proposal.forVotes,
-            proposal.againstVotes
+            proposal.againstVotes,
+            data.proposalType
         );
     }
     
@@ -317,7 +402,7 @@ contract MRTDAO is Ownable, ReentrancyGuard {
      * @dev Receive function to accept ETH payments
      */
     receive() external payable {
-        communityFund = communityFund.add(msg.value);
+        communityFund = communityFund + msg.value;
         emit FundsAdded(msg.value);
     }
 }
