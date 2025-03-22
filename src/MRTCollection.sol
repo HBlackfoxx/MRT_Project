@@ -43,6 +43,9 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     // Presale contract
     address public presaleContract;
     
+    // Nonce tracking to prevent replay attacks
+    mapping(bytes32 => bool) public usedNonces;
+    
     // Events
     event Minted(address indexed to, uint256 indexed tokenId, Rarity rarity);
     event TokensBurned(uint256 indexed tokenId);
@@ -50,6 +53,7 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     event ReducingNumberUpdated(uint256 oldValue, uint256 newValue);
     event RaritySet(uint256 indexed tokenId, Rarity rarity);
     event RarityURISet(Rarity indexed rarity, string tokenURI);
+    event NonceUsed(bytes32 nonceHash);
     
     /**
      * @dev Constructor
@@ -162,9 +166,10 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     /**
      * @dev Internal mint function - only callable by authorized contracts
      * @param to The address to mint the NFT to
-     * @param signature The signature from trusted oracle that contains rarity information
+     * @param signature The signature from trusted oracle that contains rarity information and nonce
+     * @param nonce Unique nonce to prevent replay attacks
      */
-    function mintInternal(address to, bytes memory signature) external returns (uint256) {
+    function mintInternal(address to, bytes memory signature, bytes32 nonce) external returns (uint256) {
         require(
             msg.sender == owner() || 
             msg.sender == presaleContract, 
@@ -173,6 +178,14 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         
         // Check if minting is still possible with the reducing number
         require(_currentTokenId < maxSupply, "Max supply reached");
+        
+        // Verify nonce hasn't been used
+        bytes32 nonceHash = keccak256(abi.encodePacked(nonce));
+        require(!usedNonces[nonceHash], "Nonce already used");
+        
+        // Mark nonce as used
+        usedNonces[nonceHash] = true;
+        emit NonceUsed(nonceHash);
         
         uint256 tokenId = _currentTokenId;
         _currentTokenId++;
@@ -184,7 +197,7 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         _safeMint(to, tokenId);
         
         // Extract rarity from signature
-        (Rarity rarity, address signer) = verifyAndExtractRarity(tokenId, signature);
+        (Rarity rarity, address signer) = verifyAndExtractRarity(tokenId, nonce, to, signature);
         
         // Verify the signer is our trusted oracle
         require(signer == trustedOracle, "Invalid signature");
@@ -207,11 +220,18 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     /**
      * @dev Helper function to verify and extract rarity from signature
      * @param tokenId The token ID
+     * @param nonce Unique nonce to prevent replay attacks
+     * @param recipient The address receiving the NFT
      * @param signature The signature from trusted oracle
      * @return rarity The extracted rarity
      * @return signer The address that signed the message
      */
-    function verifyAndExtractRarity(uint256 tokenId, bytes memory signature) internal pure returns (Rarity rarity, address signer) {
+    function verifyAndExtractRarity(
+        uint256 tokenId, 
+        bytes32 nonce, 
+        address recipient, 
+        bytes memory signature
+    ) internal pure returns (Rarity rarity, address signer) {
         // The first byte of the signature contains the rarity value (0-4)
         require(signature.length > 65, "Signature too short");
         
@@ -226,12 +246,14 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         }
         
         // Verify the signature
-        bytes32 messageHash = keccak256(abi.encodePacked(tokenId, uint8(rarity)));
+        // Include tokenId, rarity, nonce, and recipient in the message
+        bytes32 messageHash = keccak256(abi.encodePacked(tokenId, uint8(rarity), nonce, recipient));
         bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
         signer = ECDSA.recover(ethSignedMessageHash, actualSignature);
         
         return (rarity, signer);
     }
+    
     /**
      * @dev Reduce the maximum supply if there's enough available supply
      * @param reductionAmount Amount to reduce the max supply by
@@ -264,6 +286,15 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
      */
     function _exists(uint256 tokenId) internal view returns (bool) {
         return _ownerOf(tokenId) != address(0);
+    }
+    
+    /**
+     * @dev Check if a nonce has been used
+     * @param nonce The nonce to check
+     * @return Whether the nonce has been used
+     */
+    function isNonceUsed(bytes32 nonce) external view returns (bool) {
+        return usedNonces[keccak256(abi.encodePacked(nonce))];
     }
     
     // Required overrides for ERC721URIStorage and ERC721Enumerable

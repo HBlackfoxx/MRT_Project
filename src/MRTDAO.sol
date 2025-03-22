@@ -327,8 +327,10 @@ contract MRTDAO is Ownable, ReentrancyGuard {
         require(amount <= communityFund, "Insufficient funds");
         
         communityFund = communityFund - amount;
-        recipient.transfer(amount);
-        
+
+        (bool success,) = recipient.call{value: amount}("");
+
+        require(success, "Transfer failed");
         emit FundsWithdrawn(recipient, amount);
     }
     

@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 interface IMRTCollection {
     enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
-    function mintInternal(address to, bytes memory signature) external returns (uint256);
+    function mintInternal(address to, bytes memory signature, bytes32 nonce) external returns (uint256);
 }
 
 /**
@@ -296,7 +296,8 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     function mintWithETH(
         uint256 presaleId, 
         bytes32[] calldata proof,
-        bytes memory signature
+        bytes memory signature,
+        bytes32 nonce
     ) external payable nonReentrant {
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
@@ -309,7 +310,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         uint256 price = getCurrentPrice(presaleId);
-        require(msg.value >= price, "Insufficient ETH sent");
+        require(msg.value == price, "Insufficient ETH sent");
         
         // Increment minted count
         presale.totalMinted++;
@@ -336,7 +337,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         require(s1 && s2 && s3 && s4 && s5 && s6, "Fee distribution failed");
         
         // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature);
+        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature , nonce);
         
         emit TokenMinted(msg.sender, presaleId, tokenId, price, false);
     }
@@ -350,7 +351,8 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     function mintWithMRT(
         uint256 presaleId, 
         bytes32[] calldata proof,
-        bytes memory signature
+        bytes memory signature,
+        bytes32 nonce
     ) external nonReentrant {
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
@@ -388,7 +390,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         require(mrtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
         
         // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature);
+        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
         
         emit TokenMinted(msg.sender, presaleId, tokenId, mrtAmount, true);
     }
