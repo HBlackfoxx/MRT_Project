@@ -125,7 +125,7 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         daoContract = _daoContract;
         
         // Update royalty receiver to the new DAO address
-        (address receiver, uint256 royaltyAmount) = royaltyInfo(0, 10000);
+        (, uint256 royaltyAmount) = royaltyInfo(0, 10000);
         _setDefaultRoyalty(_daoContract, uint96(royaltyAmount));
         
         emit ContractAddressUpdated("Presale", _presaleContract);
@@ -295,11 +295,6 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
      */
     function isNonceUsed(bytes32 nonce) external view returns (bool) {
         return usedNonces[keccak256(abi.encodePacked(nonce))];
-    }
-    
-    // Required overrides for ERC721URIStorage and ERC721Enumerable
-    function _burn(uint256 tokenId) internal override(ERC721) {
-        super._burn(tokenId);
     }
     
     function tokenURI(uint256 tokenId) public view override(ERC721, ERC721URIStorage) returns (string memory) {
