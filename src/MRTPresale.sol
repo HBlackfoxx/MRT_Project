@@ -20,8 +20,9 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     // NFT Collection contract
     IMRTCollection public nftCollection;
     
-    // MRT token
+    // Token contracts
     IERC20 public mrtToken;
+    IERC20 public usdtToken;
     
     // Presale struct
     struct PresaleConfig {
@@ -31,8 +32,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 maxSupply;
         uint256 basePrice;         // In ETH
         uint256 mrtBasePrice;      // In MRT tokens
+        uint256 usdtBasePrice;     // In USDT tokens
         uint256 priceIncreaseRate; // ETH increase per mint
         uint256 mrtPriceIncreaseRate; // MRT increase per mint
+        uint256 usdtPriceIncreaseRate; // USDT increase per mint
         bytes32 merkleRoot;        // For private presales
         bool isPrivate;
         bool isActive;
@@ -40,12 +43,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     }
     
     // Fee distribution addresses
-    address public stakingContract;    // 2% - Staking reward
-    address public communityContract;  // 2% - Community reward
-    address public devWallet;          // 1% - Development & Operations
-    address public marketingWallet;    // 1% - Marketing & Community
-    address public teamWallet;         // 1% - Founders & Team Growth Fund
-    address public daoContract;        // 93% - Treasury
+    address public stakingContract;    // 25% - Staking reward
+    address public marketingWallet;    // 15% - Marketing & Community
+    address public teamWallet;         // 20% - Founders & Team Growth Fund
+    address public daoContract;        // 40% - Treasury
     
     // Presale management
     mapping(uint256 => PresaleConfig) public presales;
@@ -60,40 +61,37 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     // Events
     event PresaleCreated(uint256 indexed presaleId, bool isPrivate, uint256 startTime, uint256 endTime);
     event PresaleUpdated(uint256 indexed presaleId, bool isActive);
-    event TokenMinted(address indexed buyer, uint256 indexed presaleId, uint256 tokenId, uint256 price, bool usedMRT);
-    event FeeDistributionUpdated(address stakingContract, address communityContract, address devWallet, address marketingWallet, address teamWallet, address daoContract);
+    event TokenMinted(address indexed buyer, uint256 indexed presaleId, uint256 tokenId, uint256 price, string paymentMethod);
+    event FeeDistributionUpdated(address stakingContract, address marketingWallet, address teamWallet, address daoContract);
     event MerkleRootUpdated(uint256 indexed presaleId, bytes32 merkleRoot);
     
     /**
      * @dev Constructor
      * @param nftCollectionAddress The address of the NFT collection contract
      * @param mrtTokenAddress The address of the MRT token contract
+     * @param usdtTokenAddress The address of the USDT token contract
      * @param _trustedOracle The trusted oracle address for randomness verification
-     * @param _stakingContract Staking contract address (2%)
-     * @param _communityContract Community reward contract address (2%)
-     * @param _devWallet Development & Operations wallet (1%)
-     * @param _marketingWallet Marketing & Community wallet (1%)
-     * @param _teamWallet Founders & Team Growth Fund wallet (1%)
-     * @param _daoContract DAO contract address/treasury (93%)
+     * @param _stakingContract Staking contract address 
+     * @param _marketingWallet Marketing & Community wallet
+     * @param _teamWallet Founders & Team Growth Fund wallet
+     * @param _daoContract DAO contract address/treasury
      */
     constructor(
         address nftCollectionAddress,
         address mrtTokenAddress,
+        address usdtTokenAddress,
         address _trustedOracle,
         address _stakingContract,
-        address _communityContract,
-        address _devWallet,
         address _marketingWallet,
         address _teamWallet,
         address _daoContract
     ) Ownable(msg.sender) {
         nftCollection = IMRTCollection(nftCollectionAddress);
         mrtToken = IERC20(mrtTokenAddress);
+        usdtToken = IERC20(usdtTokenAddress);
         trustedOracle = _trustedOracle;
         
         stakingContract = _stakingContract;
-        communityContract = _communityContract;
-        devWallet = _devWallet;
         marketingWallet = _marketingWallet;
         teamWallet = _teamWallet;
         daoContract = _daoContract;
@@ -101,36 +99,28 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     
     /**
      * @dev Update fee distribution addresses
-     * @param _stakingContract Staking contract address (2%)
-     * @param _communityContract Community reward contract address (2%)
-     * @param _devWallet Development & Operations wallet (1%)
-     * @param _marketingWallet Marketing & Community wallet (1%)
-     * @param _teamWallet Founders & Team Growth Fund wallet (1%)
-     * @param _daoContract DAO contract address/treasury (93%)
+     * @param _stakingContract Staking contract address
+     * @param _marketingWallet Marketing & Community wallet
+     * @param _teamWallet Founders & Team Growth Fund wallet
+     * @param _daoContract DAO contract address/treasury
      */
     function updateFeeDistribution(
         address _stakingContract,
-        address _communityContract,
-        address _devWallet,
         address _marketingWallet,
         address _teamWallet,
         address _daoContract
     ) external onlyOwner {
         require(_stakingContract != address(0), "Invalid staking contract address");
-        require(_communityContract != address(0), "Invalid community contract address");
-        require(_devWallet != address(0), "Invalid dev wallet address");
         require(_marketingWallet != address(0), "Invalid marketing wallet address");
         require(_teamWallet != address(0), "Invalid team wallet address");
         require(_daoContract != address(0), "Invalid DAO contract address");
         
         stakingContract = _stakingContract;
-        communityContract = _communityContract;
-        devWallet = _devWallet;
         marketingWallet = _marketingWallet;
         teamWallet = _teamWallet;
         daoContract = _daoContract;
         
-        emit FeeDistributionUpdated(_stakingContract, _communityContract, _devWallet, _marketingWallet, _teamWallet, _daoContract);
+        emit FeeDistributionUpdated(_stakingContract, _marketingWallet, _teamWallet, _daoContract);
     }
 
     /**
@@ -143,14 +133,25 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     }
     
     /**
+     * @dev Update USDT token address
+     * @param _usdtTokenAddress New USDT token address
+     */
+    function updateUSDTAddress(address _usdtTokenAddress) external onlyOwner {
+        require(_usdtTokenAddress != address(0), "Invalid USDT token address");
+        usdtToken = IERC20(_usdtTokenAddress);
+    }
+    
+    /**
      * @dev Create a new presale
      * @param startTime Presale start timestamp
      * @param endTime Presale end timestamp
      * @param maxSupply Maximum NFTs that can be minted in this presale
      * @param basePrice Base price in ETH (wei)
      * @param mrtBasePrice Base price in MRT tokens
+     * @param usdtBasePrice Base price in USDT tokens
      * @param priceIncreaseRate Rate at which ETH price increases per mint
      * @param mrtPriceIncreaseRate Rate at which MRT price increases per mint
+     * @param usdtPriceIncreaseRate Rate at which USDT price increases per mint
      * @param merkleRoot Merkle root for private presale validation
      * @param isPrivate Whether this presale is private (requires merkle proof)
      * @return presaleId The ID of the created presale
@@ -161,8 +162,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 maxSupply,
         uint256 basePrice,
         uint256 mrtBasePrice,
+        uint256 usdtBasePrice,
         uint256 priceIncreaseRate,
         uint256 mrtPriceIncreaseRate,
+        uint256 usdtPriceIncreaseRate,
         bytes32 merkleRoot,
         bool isPrivate
     ) external onlyOwner returns (uint256) {
@@ -185,8 +188,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
             maxSupply: maxSupply,
             basePrice: basePrice,
             mrtBasePrice: mrtBasePrice,
+            usdtBasePrice: usdtBasePrice,
             priceIncreaseRate: priceIncreaseRate,
             mrtPriceIncreaseRate: mrtPriceIncreaseRate,
+            usdtPriceIncreaseRate: usdtPriceIncreaseRate,
             merkleRoot: merkleRoot,
             isPrivate: isPrivate,
             isActive: true,
@@ -248,6 +253,18 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         
         PresaleConfig storage presale = presales[presaleId];
         return presale.mrtBasePrice + (presale.totalMinted * presale.mrtPriceIncreaseRate);
+    }
+    
+    /**
+     * @dev Calculate current USDT price for a presale
+     * @param presaleId ID of the presale
+     * @return Current price in USDT tokens
+     */
+    function getCurrentUSDTPrice(uint256 presaleId) public view returns (uint256) {
+        require(presaleId < presaleCount, "Presale does not exist");
+        
+        PresaleConfig storage presale = presales[presaleId];
+        return presale.usdtBasePrice + (presale.totalMinted * presale.usdtPriceIncreaseRate);
     }
     
     /**
@@ -319,27 +336,23 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         // Distribute fees (percentages are fixed)
-        uint256 stakingAmount = (msg.value * 2) / 100;  // 2%
-        uint256 communityAmount = (msg.value * 2) / 100; // 2%
-        uint256 devAmount = (msg.value * 1) / 100;      // 1%
-        uint256 marketingAmount = (msg.value * 1) / 100; // 1%
-        uint256 teamAmount = (msg.value * 1) / 100;     // 1%
-        uint256 daoAmount = msg.value - stakingAmount - communityAmount - devAmount - marketingAmount - teamAmount; // Remaining 93%
+        uint256 stakingAmount = (msg.value * 25) / 100;  
+        uint256 marketingAmount = (msg.value * 15) / 100;
+        uint256 teamAmount = (msg.value * 20) / 100;
+        uint256 daoAmount = msg.value - stakingAmount - marketingAmount - teamAmount;
         
         // Send funds
         (bool s1,) = stakingContract.call{value: stakingAmount}("");
-        (bool s2,) = communityContract.call{value: communityAmount}("");
-        (bool s3,) = devWallet.call{value: devAmount}("");
-        (bool s4,) = marketingWallet.call{value: marketingAmount}("");
-        (bool s5,) = teamWallet.call{value: teamAmount}("");
-        (bool s6,) = daoContract.call{value: daoAmount}("");
+        (bool s2,) = marketingWallet.call{value: marketingAmount}("");
+        (bool s3,) = teamWallet.call{value: teamAmount}("");
+        (bool s4,) = daoContract.call{value: daoAmount}("");
         
-        require(s1 && s2 && s3 && s4 && s5 && s6, "Fee distribution failed");
+        require(s1 && s2 && s3 && s4, "Fee distribution failed");
         
         // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature , nonce);
+        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
         
-        emit TokenMinted(msg.sender, presaleId, tokenId, price, false);
+        emit TokenMinted(msg.sender, presaleId, tokenId, price, "ETH");
     }
     
     /**
@@ -374,17 +387,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         // Calculate fee distribution
-        uint256 stakingAmount = (mrtAmount * 2) / 100;  // 2%
-        uint256 communityAmount = (mrtAmount * 2) / 100; // 2%
-        uint256 devAmount = (mrtAmount * 1) / 100;      // 1%
-        uint256 marketingAmount = (mrtAmount * 1) / 100; // 1%
-        uint256 teamAmount = (mrtAmount * 1) / 100;     // 1%
-        uint256 daoAmount = mrtAmount - stakingAmount - communityAmount - devAmount - marketingAmount - teamAmount; // Remaining 93%
+        uint256 stakingAmount = (mrtAmount * 25) / 100;
+        uint256 marketingAmount = (mrtAmount * 15) / 100;
+        uint256 teamAmount = (mrtAmount * 20) / 100;
+        uint256 daoAmount = mrtAmount - stakingAmount - marketingAmount - teamAmount; 
         
         // Transfer MRT tokens from sender to fee recipients
         require(mrtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
-        require(mrtToken.transferFrom(msg.sender, communityContract, communityAmount), "Community fee transfer failed");
-        require(mrtToken.transferFrom(msg.sender, devWallet, devAmount), "Dev fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, marketingWallet, marketingAmount), "Marketing fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, teamWallet, teamAmount), "Team fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
@@ -392,7 +401,56 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         // Mint the NFT
         uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
         
-        emit TokenMinted(msg.sender, presaleId, tokenId, mrtAmount, true);
+        emit TokenMinted(msg.sender, presaleId, tokenId, mrtAmount, "MRT");
+    }
+
+    /**
+     * @dev Mint an NFT with USDT tokens
+     * @param presaleId ID of the presale
+     * @param proof Merkle proof (for private presales)
+     * @param signature Oracle signature for rarity verification
+     */
+    function mintWithUSDT(
+        uint256 presaleId, 
+        bytes32[] calldata proof,
+        bytes memory signature,
+        bytes32 nonce
+    ) external nonReentrant {
+        require(presaleId < presaleCount, "Presale does not exist");
+        require(isPresaleActive(presaleId), "Presale is not active");
+        
+        PresaleConfig storage presale = presales[presaleId];
+        
+        // Check eligibility for private presale
+        if (presale.isPrivate) {
+            require(isEligibleForPrivatePresale(presaleId, msg.sender, proof), "Not eligible for private presale");
+        }
+        
+        uint256 usdtAmount = getCurrentUSDTPrice(presaleId);
+        require(usdtToken.balanceOf(msg.sender) >= usdtAmount, "Insufficient USDT balance");
+        
+        // Increment minted count
+        presale.totalMinted++;
+        if (presale.isPrivate) {
+            presaleMinted[presaleId][msg.sender]++;
+        }
+        
+        // Calculate fee distribution
+        uint256 stakingAmount = (usdtAmount * 25) / 100;  
+        uint256 marketingAmount = (usdtAmount * 15) / 100;
+        uint256 teamAmount = (usdtAmount * 20) / 100; 
+        uint256 daoAmount = usdtAmount - stakingAmount - marketingAmount - teamAmount; // Remaining 93%
+        
+        // Transfer USDT tokens from sender to fee recipients
+        require(usdtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
+        require(usdtToken.transferFrom(msg.sender, marketingWallet, marketingAmount), "Marketing fee transfer failed");
+        require(usdtToken.transferFrom(msg.sender, teamWallet, teamAmount), "Team fee transfer failed");
+        require(usdtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
+        
+        // Mint the NFT
+        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
+        
+        emit TokenMinted(msg.sender, presaleId, tokenId, usdtAmount, "USDT");
     }
     
     /**
@@ -413,8 +471,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
      * @param endTime New end time
      * @param basePrice New base price in ETH
      * @param mrtBasePrice New base price in MRT
+     * @param usdtBasePrice New base price in USDT
      * @param priceIncreaseRate New price increase rate per mint in ETH
      * @param mrtPriceIncreaseRate New price increase rate per mint in MRT
+     * @param usdtPriceIncreaseRate New price increase rate per mint in USDT
      */
     function updatePresaleConfig(
         uint256 presaleId,
@@ -422,8 +482,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 endTime,
         uint256 basePrice,
         uint256 mrtBasePrice,
+        uint256 usdtBasePrice,
         uint256 priceIncreaseRate,
-        uint256 mrtPriceIncreaseRate
+        uint256 mrtPriceIncreaseRate,
+        uint256 usdtPriceIncreaseRate
     ) external onlyOwner {
         require(presaleId < presaleCount, "Presale does not exist");
         require(startTime < endTime, "Invalid time range");
@@ -439,8 +501,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         presale.endTime = endTime;
         presale.basePrice = basePrice;
         presale.mrtBasePrice = mrtBasePrice;
+        presale.usdtBasePrice = usdtBasePrice;
         presale.priceIncreaseRate = priceIncreaseRate;
         presale.mrtPriceIncreaseRate = mrtPriceIncreaseRate;
+        presale.usdtPriceIncreaseRate = usdtPriceIncreaseRate;
         
         emit PresaleUpdated(presaleId, presale.isActive);
     }

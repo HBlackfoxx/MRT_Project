@@ -27,7 +27,7 @@ contract DeployMRTEcosystem is Script {
     address public marketingWallet;
     address public teamWallet;
     address public trustedOracle;
-    
+    address public usdtTokenAddress;
     // Deployed contract addresses
     MRTCollection public mrtCollection;
     MRTStaking public mrtStaking;
@@ -97,6 +97,7 @@ contract DeployMRTEcosystem is Script {
             address(mrtCollection),
             mrtTokenAddress,
             trustedOracle,
+            usdtTokenAddress,
             address(mrtStaking), // staking contract
             communityWallet,     // community contract
             devWallet,           // dev wallet
