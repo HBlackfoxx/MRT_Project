@@ -45,8 +45,11 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     // Fee distribution addresses
     address public stakingContract;    // 25% - Staking reward
     address public marketingWallet;    // 15% - Marketing & Community
-    address public teamWallet;         // 20% - Founders & Team Growth Fund
+    address public vestingWallet;      // 20% - Founders & Team Growth Fund
     address public daoContract;        // 40% - Treasury
+    
+    // Toggle for USDT minting
+    bool public usdtMintEnabled;
     
     // Presale management
     mapping(uint256 => PresaleConfig) public presales;
@@ -62,8 +65,9 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     event PresaleCreated(uint256 indexed presaleId, bool isPrivate, uint256 startTime, uint256 endTime);
     event PresaleUpdated(uint256 indexed presaleId, bool isActive);
     event TokenMinted(address indexed buyer, uint256 indexed presaleId, uint256 tokenId, uint256 price, string paymentMethod);
-    event FeeDistributionUpdated(address stakingContract, address marketingWallet, address teamWallet, address daoContract);
+    event FeeDistributionUpdated(address stakingContract, address marketingWallet, address vestingWallet, address daoContract);
     event MerkleRootUpdated(uint256 indexed presaleId, bytes32 merkleRoot);
+    event USDTMintToggled(bool enabled);
     
     /**
      * @dev Constructor
@@ -73,7 +77,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
      * @param _trustedOracle The trusted oracle address for randomness verification
      * @param _stakingContract Staking contract address 
      * @param _marketingWallet Marketing & Community wallet
-     * @param _teamWallet Founders & Team Growth Fund wallet
+     * @param _vestingWallet Founders & Team Growth Fund wallet
      * @param _daoContract DAO contract address/treasury
      */
     constructor(
@@ -83,7 +87,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         address _trustedOracle,
         address _stakingContract,
         address _marketingWallet,
-        address _teamWallet,
+        address _vestingWallet,
         address _daoContract
     ) Ownable(msg.sender) {
         nftCollection = IMRTCollection(nftCollectionAddress);
@@ -93,7 +97,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         
         stakingContract = _stakingContract;
         marketingWallet = _marketingWallet;
-        teamWallet = _teamWallet;
+        vestingWallet = _vestingWallet;
         daoContract = _daoContract;
     }
     
@@ -101,26 +105,26 @@ contract MRTPresale is Ownable, ReentrancyGuard {
      * @dev Update fee distribution addresses
      * @param _stakingContract Staking contract address
      * @param _marketingWallet Marketing & Community wallet
-     * @param _teamWallet Founders & Team Growth Fund wallet
+     * @param _vestingWallet Founders & Team Growth Fund wallet
      * @param _daoContract DAO contract address/treasury
      */
     function updateFeeDistribution(
         address _stakingContract,
         address _marketingWallet,
-        address _teamWallet,
+        address _vestingWallet,
         address _daoContract
     ) external onlyOwner {
         require(_stakingContract != address(0), "Invalid staking contract address");
         require(_marketingWallet != address(0), "Invalid marketing wallet address");
-        require(_teamWallet != address(0), "Invalid team wallet address");
+        require(_vestingWallet != address(0), "Invalid vesting wallet address");
         require(_daoContract != address(0), "Invalid DAO contract address");
         
         stakingContract = _stakingContract;
         marketingWallet = _marketingWallet;
-        teamWallet = _teamWallet;
+        vestingWallet = _vestingWallet;
         daoContract = _daoContract;
         
-        emit FeeDistributionUpdated(_stakingContract, _marketingWallet, _teamWallet, _daoContract);
+        emit FeeDistributionUpdated(_stakingContract, _marketingWallet, _vestingWallet, _daoContract);
     }
 
     /**
@@ -139,6 +143,15 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     function updateUSDTAddress(address _usdtTokenAddress) external onlyOwner {
         require(_usdtTokenAddress != address(0), "Invalid USDT token address");
         usdtToken = IERC20(_usdtTokenAddress);
+    }
+    
+    /**
+     * @dev Toggle USDT minting functionality
+     * @param _enabled Whether USDT minting should be enabled
+     */
+    function toggleUSDTMint(bool _enabled) external onlyOwner {
+        usdtMintEnabled = _enabled;
+        emit USDTMintToggled(_enabled);
     }
     
     /**
@@ -338,13 +351,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         // Distribute fees (percentages are fixed)
         uint256 stakingAmount = (msg.value * 25) / 100;  
         uint256 marketingAmount = (msg.value * 15) / 100;
-        uint256 teamAmount = (msg.value * 20) / 100;
-        uint256 daoAmount = msg.value - stakingAmount - marketingAmount - teamAmount;
+        uint256 vestingAmount = (msg.value * 20) / 100;
+        uint256 daoAmount = msg.value - stakingAmount - marketingAmount - vestingAmount;
         
         // Send funds
         (bool s1,) = stakingContract.call{value: stakingAmount}("");
         (bool s2,) = marketingWallet.call{value: marketingAmount}("");
-        (bool s3,) = teamWallet.call{value: teamAmount}("");
+        (bool s3,) = vestingWallet.call{value: vestingAmount}("");
         (bool s4,) = daoContract.call{value: daoAmount}("");
         
         require(s1 && s2 && s3 && s4, "Fee distribution failed");
@@ -389,13 +402,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         // Calculate fee distribution
         uint256 stakingAmount = (mrtAmount * 25) / 100;
         uint256 marketingAmount = (mrtAmount * 15) / 100;
-        uint256 teamAmount = (mrtAmount * 20) / 100;
-        uint256 daoAmount = mrtAmount - stakingAmount - marketingAmount - teamAmount; 
+        uint256 vestingAmount = (mrtAmount * 20) / 100;
+        uint256 daoAmount = mrtAmount - stakingAmount - marketingAmount - vestingAmount; 
         
         // Transfer MRT tokens from sender to fee recipients
         require(mrtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, marketingWallet, marketingAmount), "Marketing fee transfer failed");
-        require(mrtToken.transferFrom(msg.sender, teamWallet, teamAmount), "Team fee transfer failed");
+        require(mrtToken.transferFrom(msg.sender, vestingWallet, vestingAmount), "Vesting fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
         
         // Mint the NFT
@@ -416,6 +429,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         bytes memory signature,
         bytes32 nonce
     ) external nonReentrant {
+        require(usdtMintEnabled, "USDT minting is currently disabled");
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
         
@@ -438,13 +452,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         // Calculate fee distribution
         uint256 stakingAmount = (usdtAmount * 25) / 100;  
         uint256 marketingAmount = (usdtAmount * 15) / 100;
-        uint256 teamAmount = (usdtAmount * 20) / 100; 
-        uint256 daoAmount = usdtAmount - stakingAmount - marketingAmount - teamAmount; // Remaining 93%
+        uint256 vestingAmount = (usdtAmount * 20) / 100; 
+        uint256 daoAmount = usdtAmount - stakingAmount - marketingAmount - vestingAmount;
         
         // Transfer USDT tokens from sender to fee recipients
         require(usdtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
         require(usdtToken.transferFrom(msg.sender, marketingWallet, marketingAmount), "Marketing fee transfer failed");
-        require(usdtToken.transferFrom(msg.sender, teamWallet, teamAmount), "Team fee transfer failed");
+        require(usdtToken.transferFrom(msg.sender, vestingWallet, vestingAmount), "Vesting fee transfer failed");
         require(usdtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
         
         // Mint the NFT
