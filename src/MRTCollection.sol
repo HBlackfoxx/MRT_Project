@@ -57,8 +57,6 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     
     /**
      * @dev Constructor
-     * @param name_ The name of the NFT collection
-     * @param symbol_ The symbol of the NFT collection
      * @param baseTokenURI_ The base URI for token metadata
      * @param mrtTokenAddress The address of the MRT token contract
      * @param _trustedOracle The trusted oracle address for randomness verification
@@ -66,14 +64,12 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
      * @param _royaltyPercentage The royalty percentage (between 5-10%)
      */
     constructor(
-        string memory name_,
-        string memory symbol_,
         string memory baseTokenURI_,
         address mrtTokenAddress,
         address _trustedOracle,
         address _daoContract,
         uint96 _royaltyPercentage
-    ) ERC721(name_, symbol_) Ownable(msg.sender) {
+    ) ERC721("Meana Raptor Genesis", "MRNFT") Ownable(msg.sender) {
         _baseTokenURI = baseTokenURI_;
         mrtToken = IERC20(mrtTokenAddress);
         trustedOracle = _trustedOracle;

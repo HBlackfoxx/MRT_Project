@@ -13,9 +13,6 @@ contract DeployMRTEcosystem is Script {
     // ERC20 Token address (this should be already deployed)
     address public mrtTokenAddress;
     
-    // Configuration parameters
-    string public constant NFT_NAME = "MRT Collection";
-    string public constant NFT_SYMBOL = "MRT";
     string public constant BASE_URI = "https://mrt-api.example.com/metadata/";
     uint96 public constant ROYALTY_PERCENTAGE = 750; // 7.5%
     
@@ -64,8 +61,6 @@ contract DeployMRTEcosystem is Script {
         // 1. Deploy MRTCollection
         console.log("Deploying MRTCollection...");
         mrtCollection = new MRTCollection(
-            NFT_NAME,
-            NFT_SYMBOL,
             BASE_URI,
             mrtTokenAddress,
             trustedOracle,
@@ -99,8 +94,6 @@ contract DeployMRTEcosystem is Script {
             trustedOracle,
             usdtTokenAddress,
             address(mrtStaking), // staking contract
-            communityWallet,     // community contract
-            devWallet,           // dev wallet
             marketingWallet,     // marketing wallet
             teamWallet,          // team wallet
             address(mrtDao)      // DAO contract/treasury
