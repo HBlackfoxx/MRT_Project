@@ -8,12 +8,14 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 interface IMRTCollection {
     enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
+    function batchMintInternal(address to, bytes memory signature, bytes32 nonce, uint256 quantity) external returns (uint256[] memory);
     function mintInternal(address to, bytes memory signature, bytes32 nonce) external returns (uint256);
 }
 
 /**
  * @title MRTPresale
  * @dev Manages multiple presales for the MRT NFT Collection with public and private options
+ * @notice Updated to support batch minting and per-address limits
  */
 contract MRTPresale is Ownable, ReentrancyGuard {
     
@@ -37,6 +39,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 mrtPriceIncreaseRate; // MRT increase per mint
         uint256 usdtPriceIncreaseRate; // USDT increase per mint
         bytes32 merkleRoot;        // For private presales
+        uint256 maxPerAddress;     // Maximum NFTs an address can mint in this presale
         bool isPrivate;
         bool isActive;
         uint256 totalMinted;
@@ -62,9 +65,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
     address public trustedOracle;
     
     // Events
-    event PresaleCreated(uint256 indexed presaleId, bool isPrivate, uint256 startTime, uint256 endTime);
+    event PresaleCreated(uint256 indexed presaleId, bool isPrivate, uint256 startTime, uint256 endTime, uint256 maxPerAddress);
     event PresaleUpdated(uint256 indexed presaleId, bool isActive);
     event TokenMinted(address indexed buyer, uint256 indexed presaleId, uint256 tokenId, uint256 price, string paymentMethod);
+    event BatchMinted(address indexed buyer, uint256 indexed presaleId, uint256[] tokenIds, uint256 price, uint256 quantity, string paymentMethod);
     event FeeDistributionUpdated(address stakingContract, address marketingWallet, address vestingWallet, address daoContract);
     event MerkleRootUpdated(uint256 indexed presaleId, bytes32 merkleRoot);
     event USDTMintToggled(bool enabled);
@@ -166,6 +170,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
      * @param mrtPriceIncreaseRate Rate at which MRT price increases per mint
      * @param usdtPriceIncreaseRate Rate at which USDT price increases per mint
      * @param merkleRoot Merkle root for private presale validation
+     * @param maxPerAddress Maximum number of NFTs an address can mint in this presale
      * @param isPrivate Whether this presale is private (requires merkle proof)
      * @return presaleId The ID of the created presale
      */
@@ -180,11 +185,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 mrtPriceIncreaseRate,
         uint256 usdtPriceIncreaseRate,
         bytes32 merkleRoot,
+        uint256 maxPerAddress,
         bool isPrivate
     ) external onlyOwner returns (uint256) {
         require(startTime < endTime, "Invalid time range");
         require(startTime > block.timestamp, "Start time must be in the future");
         require(maxSupply > 0, "Max supply must be greater than 0");
+        require(maxPerAddress > 0, "Max per address must be greater than 0");
         
         // If private, require valid merkle root
         if (isPrivate) {
@@ -206,12 +213,13 @@ contract MRTPresale is Ownable, ReentrancyGuard {
             mrtPriceIncreaseRate: mrtPriceIncreaseRate,
             usdtPriceIncreaseRate: usdtPriceIncreaseRate,
             merkleRoot: merkleRoot,
+            maxPerAddress: maxPerAddress,
             isPrivate: isPrivate,
             isActive: true,
             totalMinted: 0
         });
         
-        emit PresaleCreated(presaleId, isPrivate, startTime, endTime);
+        emit PresaleCreated(presaleId, isPrivate, startTime, endTime, maxPerAddress);
         
         return presaleId;
     }
@@ -312,27 +320,38 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         return (
             presale.isActive &&
             block.timestamp >= presale.startTime &&
-            block.timestamp <= presale.endTime &&
-            presale.totalMinted < presale.maxSupply
+            block.timestamp <= presale.endTime
         );
     }
     
+    
     /**
-     * @dev Mint an NFT with ETH
+     * @dev Batch mint NFTs with ETH
      * @param presaleId ID of the presale
      * @param proof Merkle proof (for private presales)
      * @param signature Oracle signature for rarity verification
+     * @param nonce Unique nonce to prevent replay attacks
+     * @param quantity Number of NFTs to mint in this batch
      */
-    function mintWithETH(
+    function batchMintWithETH(
         uint256 presaleId, 
         bytes32[] calldata proof,
         bytes memory signature,
-        bytes32 nonce
-    ) external payable nonReentrant {
+        bytes32 nonce,
+        uint256 quantity
+    ) public payable nonReentrant {
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
+        require(quantity > 0, "Quantity must be greater than 0");
         
         PresaleConfig storage presale = presales[presaleId];
+        
+        // Check if there's enough supply left in the presale
+        require(presale.totalMinted + quantity <= presale.maxSupply, "Exceeds presale supply");
+        
+        // Check if the user hasn't exceeded their per-address limit
+        require(presaleMinted[presaleId][msg.sender] + quantity <= presale.maxPerAddress, 
+            "Exceeds max per address");
         
         // Check eligibility for private presale
         if (presale.isPrivate) {
@@ -340,13 +359,12 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         uint256 price = getCurrentPrice(presaleId);
-        require(msg.value == price, "Insufficient ETH sent");
+        uint256 totalPrice = price * quantity;
+        require(msg.value == totalPrice, "Incorrect ETH amount");
         
         // Increment minted count
-        presale.totalMinted++;
-        if (presale.isPrivate) {
-            presaleMinted[presaleId][msg.sender]++;
-        }
+        presale.totalMinted += quantity;
+        presaleMinted[presaleId][msg.sender] += quantity;
         
         // Distribute fees (percentages are fixed)
         uint256 stakingAmount = (msg.value * 25) / 100;  
@@ -362,28 +380,40 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         
         require(s1 && s2 && s3 && s4, "Fee distribution failed");
         
-        // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
+        // Mint the NFTs
+        uint256[] memory tokenIds = nftCollection.batchMintInternal(msg.sender, signature, nonce, quantity);
         
-        emit TokenMinted(msg.sender, presaleId, tokenId, price, "ETH");
+        emit BatchMinted(msg.sender, presaleId, tokenIds, price, quantity, "ETH");
     }
     
+    
     /**
-     * @dev Mint an NFT with MRT tokens
+     * @dev Batch mint NFTs with MRT tokens
      * @param presaleId ID of the presale
      * @param proof Merkle proof (for private presales)
      * @param signature Oracle signature for rarity verification
+     * @param nonce Unique nonce to prevent replay attacks
+     * @param quantity Number of NFTs to mint in this batch
      */
-    function mintWithMRT(
+    function batchMintWithMRT(
         uint256 presaleId, 
         bytes32[] calldata proof,
         bytes memory signature,
-        bytes32 nonce
-    ) external nonReentrant {
+        bytes32 nonce,
+        uint256 quantity
+    ) public nonReentrant {
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
+        require(quantity > 0, "Quantity must be greater than 0");
         
         PresaleConfig storage presale = presales[presaleId];
+        
+        // Check if there's enough supply left in the presale
+        require(presale.totalMinted + quantity <= presale.maxSupply, "Exceeds presale supply");
+        
+        // Check if the user hasn't exceeded their per-address limit
+        require(presaleMinted[presaleId][msg.sender] + quantity <= presale.maxPerAddress, 
+            "Exceeds max per address");
         
         // Check eligibility for private presale
         if (presale.isPrivate) {
@@ -391,19 +421,18 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         uint256 mrtAmount = getCurrentMRTPrice(presaleId);
-        require(mrtToken.balanceOf(msg.sender) >= mrtAmount, "Insufficient MRT balance");
+        uint256 totalMrtAmount = mrtAmount * quantity;
+        require(mrtToken.balanceOf(msg.sender) >= totalMrtAmount, "Insufficient MRT balance");
         
         // Increment minted count
-        presale.totalMinted++;
-        if (presale.isPrivate) {
-            presaleMinted[presaleId][msg.sender]++;
-        }
+        presale.totalMinted += quantity;
+        presaleMinted[presaleId][msg.sender] += quantity;
         
         // Calculate fee distribution
-        uint256 stakingAmount = (mrtAmount * 25) / 100;
-        uint256 marketingAmount = (mrtAmount * 15) / 100;
-        uint256 vestingAmount = (mrtAmount * 20) / 100;
-        uint256 daoAmount = mrtAmount - stakingAmount - marketingAmount - vestingAmount; 
+        uint256 stakingAmount = (totalMrtAmount * 25) / 100;
+        uint256 marketingAmount = (totalMrtAmount * 15) / 100;
+        uint256 vestingAmount = (totalMrtAmount * 20) / 100;
+        uint256 daoAmount = totalMrtAmount - stakingAmount - marketingAmount - vestingAmount; 
         
         // Transfer MRT tokens from sender to fee recipients
         require(mrtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
@@ -411,29 +440,40 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         require(mrtToken.transferFrom(msg.sender, vestingWallet, vestingAmount), "Vesting fee transfer failed");
         require(mrtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
         
-        // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
+        // Mint the NFTs
+        uint256[] memory tokenIds = nftCollection.batchMintInternal(msg.sender, signature, nonce, quantity);
         
-        emit TokenMinted(msg.sender, presaleId, tokenId, mrtAmount, "MRT");
+        emit BatchMinted(msg.sender, presaleId, tokenIds, mrtAmount, quantity, "MRT");
     }
-
+    
     /**
-     * @dev Mint an NFT with USDT tokens
+     * @dev Batch mint NFTs with USDT tokens
      * @param presaleId ID of the presale
      * @param proof Merkle proof (for private presales)
      * @param signature Oracle signature for rarity verification
+     * @param nonce Unique nonce to prevent replay attacks
+     * @param quantity Number of NFTs to mint in this batch
      */
-    function mintWithUSDT(
+    function batchMintWithUSDT(
         uint256 presaleId, 
         bytes32[] calldata proof,
         bytes memory signature,
-        bytes32 nonce
-    ) external nonReentrant {
+        bytes32 nonce,
+        uint256 quantity
+    ) public nonReentrant {
         require(usdtMintEnabled, "USDT minting is currently disabled");
         require(presaleId < presaleCount, "Presale does not exist");
         require(isPresaleActive(presaleId), "Presale is not active");
+        require(quantity > 0, "Quantity must be greater than 0");
         
         PresaleConfig storage presale = presales[presaleId];
+        
+        // Check if there's enough supply left in the presale
+        require(presale.totalMinted + quantity <= presale.maxSupply, "Exceeds presale supply");
+        
+        // Check if the user hasn't exceeded their per-address limit
+        require(presaleMinted[presaleId][msg.sender] + quantity <= presale.maxPerAddress, 
+            "Exceeds max per address");
         
         // Check eligibility for private presale
         if (presale.isPrivate) {
@@ -441,19 +481,18 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         }
         
         uint256 usdtAmount = getCurrentUSDTPrice(presaleId);
-        require(usdtToken.balanceOf(msg.sender) >= usdtAmount, "Insufficient USDT balance");
+        uint256 totalUsdtAmount = usdtAmount * quantity;
+        require(usdtToken.balanceOf(msg.sender) >= totalUsdtAmount, "Insufficient USDT balance");
         
         // Increment minted count
-        presale.totalMinted++;
-        if (presale.isPrivate) {
-            presaleMinted[presaleId][msg.sender]++;
-        }
+        presale.totalMinted += quantity;
+        presaleMinted[presaleId][msg.sender] += quantity;
         
         // Calculate fee distribution
-        uint256 stakingAmount = (usdtAmount * 25) / 100;  
-        uint256 marketingAmount = (usdtAmount * 15) / 100;
-        uint256 vestingAmount = (usdtAmount * 20) / 100; 
-        uint256 daoAmount = usdtAmount - stakingAmount - marketingAmount - vestingAmount;
+        uint256 stakingAmount = (totalUsdtAmount * 25) / 100;  
+        uint256 marketingAmount = (totalUsdtAmount * 15) / 100;
+        uint256 vestingAmount = (totalUsdtAmount * 20) / 100; 
+        uint256 daoAmount = totalUsdtAmount - stakingAmount - marketingAmount - vestingAmount;
         
         // Transfer USDT tokens from sender to fee recipients
         require(usdtToken.transferFrom(msg.sender, stakingContract, stakingAmount), "Staking fee transfer failed");
@@ -461,10 +500,10 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         require(usdtToken.transferFrom(msg.sender, vestingWallet, vestingAmount), "Vesting fee transfer failed");
         require(usdtToken.transferFrom(msg.sender, daoContract, daoAmount), "DAO fee transfer failed");
         
-        // Mint the NFT
-        uint256 tokenId = nftCollection.mintInternal(msg.sender, signature, nonce);
+        // Mint the NFTs
+        uint256[] memory tokenIds = nftCollection.batchMintInternal(msg.sender, signature, nonce, quantity);
         
-        emit TokenMinted(msg.sender, presaleId, tokenId, usdtAmount, "USDT");
+        emit BatchMinted(msg.sender, presaleId, tokenIds, usdtAmount, quantity, "USDT");
     }
     
     /**
@@ -489,6 +528,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
      * @param priceIncreaseRate New price increase rate per mint in ETH
      * @param mrtPriceIncreaseRate New price increase rate per mint in MRT
      * @param usdtPriceIncreaseRate New price increase rate per mint in USDT
+     * @param maxPerAddress New maximum NFTs an address can mint
      */
     function updatePresaleConfig(
         uint256 presaleId,
@@ -499,10 +539,12 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         uint256 usdtBasePrice,
         uint256 priceIncreaseRate,
         uint256 mrtPriceIncreaseRate,
-        uint256 usdtPriceIncreaseRate
+        uint256 usdtPriceIncreaseRate,
+        uint256 maxPerAddress
     ) external onlyOwner {
         require(presaleId < presaleCount, "Presale does not exist");
         require(startTime < endTime, "Invalid time range");
+        require(maxPerAddress > 0, "Max per address must be greater than 0");
         
         PresaleConfig storage presale = presales[presaleId];
         
@@ -519,6 +561,7 @@ contract MRTPresale is Ownable, ReentrancyGuard {
         presale.priceIncreaseRate = priceIncreaseRate;
         presale.mrtPriceIncreaseRate = mrtPriceIncreaseRate;
         presale.usdtPriceIncreaseRate = usdtPriceIncreaseRate;
+        presale.maxPerAddress = maxPerAddress;
         
         emit PresaleUpdated(presaleId, presale.isActive);
     }

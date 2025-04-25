@@ -12,14 +12,12 @@ import "@openzeppelin/contracts/token/common/ERC2981.sol";
 /**
  * @title MRTCollection
  * @dev Main NFT contract with burning mechanism and team tax allocation
+ * @notice Updated to support batch minting with multiple rarities
  */
 contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {    
     // Simple counter replacement
     uint256 private _currentTokenId;
     
-    // Maximum supply
-    uint256 public maxSupply = 10000;
-        
     // Base URI for metadata
     string private _baseTokenURI;
     
@@ -48,9 +46,9 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     
     // Events
     event Minted(address indexed to, uint256 indexed tokenId, Rarity rarity);
+    event BatchMinted(address indexed to, uint256[] tokenIds, uint256 quantity);
     event TokensBurned(uint256 indexed tokenId);
     event ContractAddressUpdated(string indexed contractType, address indexed contractAddress);
-    event ReducingNumberUpdated(uint256 oldValue, uint256 newValue);
     event RaritySet(uint256 indexed tokenId, Rarity rarity);
     event RarityURISet(Rarity indexed rarity, string tokenURI);
     event NonceUsed(bytes32 nonceHash);
@@ -79,17 +77,6 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         
         daoContract = _daoContract;
         _setDefaultRoyalty(_daoContract, _royaltyPercentage);
-    }
-    
-    /**
-     * @dev Get available supply
-     * @return The number of tokens still available for minting
-     */
-    function getAvailableSupply() public view returns (uint256) {
-        if (_currentTokenId >= maxSupply) {
-            return 0;
-        }
-        return maxSupply - _currentTokenId;
     }
         
     /**
@@ -160,20 +147,24 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
     }
 
     /**
-     * @dev Internal mint function - only callable by authorized contracts
-     * @param to The address to mint the NFT to
-     * @param signature The signature from trusted oracle that contains rarity information and nonce
+     * @dev Batch mint function - only callable by authorized contracts
+     * @param to The address to mint the NFTs to
+     * @param signature The signature from trusted oracle containing rarities information and nonce
      * @param nonce Unique nonce to prevent replay attacks
+     * @param quantity Number of NFTs to mint in this batch
+     * @return tokenIds Array of minted token IDs
      */
-    function mintInternal(address to, bytes memory signature, bytes32 nonce) external returns (uint256) {
+    function batchMintInternal(
+        address to, 
+        bytes memory signature, 
+        bytes32 nonce,
+        uint256 quantity
+    ) external returns (uint256[] memory) {
         require(
             msg.sender == owner() || 
             msg.sender == presaleContract, 
             "Caller is not authorized to mint"
         );
-        
-        // Check if minting is still possible with the reducing number
-        require(_currentTokenId < maxSupply, "Max supply reached");
         
         // Verify nonce hasn't been used
         bytes32 nonceHash = keccak256(abi.encodePacked(nonce));
@@ -183,91 +174,106 @@ contract MRTCollection is ERC721Enumerable, ERC721URIStorage, ERC2981, Ownable {
         usedNonces[nonceHash] = true;
         emit NonceUsed(nonceHash);
         
-        uint256 tokenId = _currentTokenId;
-        _currentTokenId++;
-
-        // Reduce max supply by 1 with each mint
-        maxSupply--;
-
-        // Mint the NFT
-        _safeMint(to, tokenId);
-        
-        // Extract rarity from signature
-        (Rarity rarity, address signer) = verifyAndExtractRarity(tokenId, nonce, to, signature);
+        // Extract rarities from signature
+        (Rarity[] memory rarities, address signer) = verifyAndExtractRarities(to, nonce, quantity, signature);
         
         // Verify the signer is our trusted oracle
         require(signer == trustedOracle, "Invalid signature");
         
-        // Set the token URI based on rarity
-        string memory tokenUriForRarity = rarityToURI[rarity];
-        require(bytes(tokenUriForRarity).length > 0, "URI not set for this rarity");
-        _setTokenURI(tokenId, tokenUriForRarity);
+        uint256[] memory tokenIds = new uint256[](quantity);
         
-        // Set the rarity
-        tokenRarity[tokenId] = rarity;
-        emit RaritySet(tokenId, rarity);
+        // Mint each NFT
+        for (uint256 i = 0; i < quantity; i++) {
+            uint256 tokenId = _currentTokenId;
+            _currentTokenId++;
+
+            // Mint the NFT
+            _safeMint(to, tokenId);
+            
+            // Set the token URI based on rarity
+            string memory tokenUriForRarity = rarityToURI[rarities[i]];
+            require(bytes(tokenUriForRarity).length > 0, "URI not set for this rarity");
+            _setTokenURI(tokenId, tokenUriForRarity);
+            
+            // Set the rarity
+            tokenRarity[tokenId] = rarities[i];
+            emit RaritySet(tokenId, rarities[i]);
+            
+            emit Minted(to, tokenId, rarities[i]);
+            
+            tokenIds[i] = tokenId;
+        }
         
-        emit Minted(to, tokenId, rarity);
+        emit BatchMinted(to, tokenIds, quantity);
         
-        return tokenId;
+        return tokenIds;
     }
     
+    /**
+     * @dev For backward compatibility - Single mint function
+     * @param to The address to mint the NFT to
+     * @param signature The signature from trusted oracle containing rarity information
+     * @param nonce Unique nonce to prevent replay attacks
+     * @return tokenId The ID of the minted token
+     */
+    function mintInternal(address to, bytes memory signature, bytes32 nonce) external returns (uint256) {
+        uint256[] memory tokenIds = this.batchMintInternal(to, signature, nonce, 1);
+        return tokenIds[0];
+    }
 
     /**
-     * @dev Helper function to verify and extract rarity from signature
-     * @param tokenId The token ID
+     * @dev Helper function to verify and extract rarities from signature
+     * @param recipient The address receiving the NFTs
      * @param nonce Unique nonce to prevent replay attacks
-     * @param recipient The address receiving the NFT
+     * @param quantity Number of NFTs being minted
      * @param signature The signature from trusted oracle
-     * @return rarity The extracted rarity
+     * @return rarities Array of rarities extracted from the signature
      * @return signer The address that signed the message
      */
-    function verifyAndExtractRarity(
-        uint256 tokenId, 
-        bytes32 nonce, 
+    function verifyAndExtractRarities(
         address recipient, 
+        bytes32 nonce, 
+        uint256 quantity,
         bytes memory signature
-    ) internal pure returns (Rarity rarity, address signer) {
-        // The first byte of the signature contains the rarity value (0-4)
-        require(signature.length > 65, "Signature too short");
+    ) internal pure returns (Rarity[] memory rarities, address signer) {
+        // The first bytes of the signature contain the rarity values (0-4)
+        require(signature.length >= 65 + quantity, "Signature too short");
         
-        // Extract rarity from the first byte
-        rarity = Rarity(uint8(signature[0]));
-        require(uint8(rarity) <= uint8(Rarity.LEGENDARY), "Invalid rarity value");
+        // Extract rarities from the first bytes
+        rarities = new Rarity[](quantity);
+        for (uint256 i = 0; i < quantity; i++) {
+            rarities[i] = Rarity(uint8(signature[i]));
+            require(uint8(rarities[i]) <= uint8(Rarity.LEGENDARY), "Invalid rarity value");
+        }
         
-        // Extract the actual signature (skip the first byte)
+        // Extract the actual signature (skip the rarity bytes)
         bytes memory actualSignature = new bytes(65);
         for (uint i = 0; i < 65; i++) {
-            actualSignature[i] = signature[i + 1];
+            actualSignature[i] = signature[i + quantity];
         }
         
         // Verify the signature
-        // Include tokenId, rarity, nonce, and recipient in the message
-        bytes32 messageHash = keccak256(abi.encodePacked(tokenId, uint8(rarity), nonce, recipient));
+        // Include recipient, nonce, quantity, and encoded rarities in the message
+        bytes32 messageHash = keccak256(abi.encodePacked(recipient, nonce, quantity, encodedRarities(rarities)));
         bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
         signer = ECDSA.recover(ethSignedMessageHash, actualSignature);
         
-        return (rarity, signer);
+        return (rarities, signer);
     }
     
     /**
-     * @dev Reduce the maximum supply if there's enough available supply
-     * @param reductionAmount Amount to reduce the max supply by
-     * @return Whether the reduction was successful
+     * @dev Helper function to encode rarities for signature verification
+     * @param rarities Array of rarities to encode
+     * @return encoded Encoded rarities as bytes
      */
-    function reduceMaxSupply(uint256 reductionAmount) external returns (bool) {
-        require(msg.sender == owner() || msg.sender == daoContract, "Only owner or DAO can reduce max supply");
-        
-        // Check if there's enough available supply to reduce
-        uint256 availableSupply = getAvailableSupply();
-        require(availableSupply >= reductionAmount, "Not enough available supply to reduce");
-        
-        // Reduce the max supply
-        maxSupply -= reductionAmount;
-                
-        return true;
+    function encodedRarities(Rarity[] memory rarities) internal pure returns (bytes memory) {
+        bytes memory encoded = new bytes(rarities.length);
+        for (uint256 i = 0; i < rarities.length; i++) {
+            encoded[i] = bytes1(uint8(rarities[i]));
+        }
+        return encoded;
     }
-
+    
     /**
      * @dev Get the current token ID
      */
