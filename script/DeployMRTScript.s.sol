@@ -14,7 +14,7 @@ import {MRTPresale} from "../src/MRTPresale.sol";
 contract DeployMRTScript is Script {
     // Anvil default addresses (first 10 accounts)
     // Each with 10000 ETH by default
-    address private constant ANVIL_ACCOUNT_0 = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266; // Default deployer
+    address private constant ANVIL_ACCOUNT_0 = 0xc2A35f8d2c9d36e4e93D2897fD1845b2727159f6; // Default deployer
     address private constant ANVIL_ACCOUNT_1 = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
     address private constant ANVIL_ACCOUNT_2 = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
     address private constant ANVIL_ACCOUNT_3 = 0x90F79bf6EB2c4f870365E785982E1f101E93b906;
@@ -40,7 +40,7 @@ contract DeployMRTScript is Script {
     MRTPresale public presaleContract;
 
     // Settings for deployment
-    string private constant BASE_URI = "https://api.meanaraptors.xyz/metadata/";
+    string private constant BASE_URI = "";
     uint96 private constant ROYALTY_PERCENTAGE = 500; // 5%
     
     // Presale configuration
@@ -54,21 +54,15 @@ contract DeployMRTScript is Script {
     function run() external {
         // For Anvil, we can use the default private key of account 0
         // Anvil's first private key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-        uint256 deployerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+        uint256 deployerPrivateKey = 0xadae6972a8485ae2c033aa4c1f8c5816057d31c6944f060cac47daabff69ba95;
         vm.startBroadcast(deployerPrivateKey);
 
         // 1. Deploy mock tokens
         console.log("Deploying mock MRT token...");
         mrtToken = new ERC20Mock();
         // Initialize with name, symbol, and initial supply to deployer
-        mrtToken.mint(ANVIL_ACCOUNT_0, 1000000 ether);
+        mrtToken.mint(ANVIL_ACCOUNT_0, 10000000 ether);
         console.log("MRT Token deployed at: ", address(mrtToken));
-
-        console.log("Deploying mock USDT token...");
-        usdtToken = new ERC20Mock();
-
-        mrtToken.transfer(ANVIL_ACCOUNT_6, 10 ether);
-        console.log("Transfering amount to: ", ANVIL_ACCOUNT_6);
 
         // 2. Deploy NFT Collection
         console.log("Deploying NFT Collection...");
@@ -104,16 +98,16 @@ contract DeployMRTScript is Script {
 
         // 5. Setup rarity URIs in NFT Collection
         console.log("Setting up rarity URIs in NFT Collection...");
-        nftCollection.setRarityURI(MRTCollection.Rarity.COMMON, "https://ipfs.io/ipfs/QmMockCID1234567890abcdef/Common.json");
-        nftCollection.setRarityURI(MRTCollection.Rarity.UNCOMMON, "https://ipfs.io/ipfs/QmMockCID1234567890abcdef/Uncommon.json");
-        nftCollection.setRarityURI(MRTCollection.Rarity.RARE, "https://ipfs.io/ipfs/QmMockCID1234567890abcdef/Rare.json");
-        nftCollection.setRarityURI(MRTCollection.Rarity.EPIC, "https://ipfs.io/ipfs/QmMockCID1234567890abcdef/Epic.json");
-        nftCollection.setRarityURI(MRTCollection.Rarity.LEGENDARY, "https://ipfs.io/ipfs/QmMockCID1234567890abcdef/Legendary.json");
+        nftCollection.setRarityURI(MRTCollection.Rarity.COMMON, "ipfs://bafybeid2236qukuqfxd5763l6jnuipsgdg4acano4ez7wbl47rutn54ify/Common.json");
+        nftCollection.setRarityURI(MRTCollection.Rarity.UNCOMMON, "ipfs://bafybeid2236qukuqfxd5763l6jnuipsgdg4acano4ez7wbl47rutn54ify/Uncommon.json");
+        nftCollection.setRarityURI(MRTCollection.Rarity.RARE, "ipfs://bafybeid2236qukuqfxd5763l6jnuipsgdg4acano4ez7wbl47rutn54ify/Rare.json");
+        nftCollection.setRarityURI(MRTCollection.Rarity.EPIC, "ipfs://bafybeid2236qukuqfxd5763l6jnuipsgdg4acano4ez7wbl47rutn54ify/Epic.json");
+        nftCollection.setRarityURI(MRTCollection.Rarity.LEGENDARY, "ipfs://bafybeid2236qukuqfxd5763l6jnuipsgdg4acano4ez7wbl47rutn54ify/Legendary.json");
 
         // 6. Create a public presale
         console.log("Creating public presale...");
         uint256 presaleId = presaleContract.createPresale(
-            block.timestamp + 10,
+            block.timestamp + 100,
             block.timestamp + 10000000,
             MAX_SUPPLY,
             BASE_PRICE,
@@ -127,23 +121,6 @@ contract DeployMRTScript is Script {
             false // Public sale
         );
         console.log("Created presale with ID: ", presaleId);
-
-        // 7. Mint some MRT tokens to test accounts for testing
-        address[] memory testAccounts = new address[](5);
-        testAccounts[0] = ANVIL_ACCOUNT_5;  // DAO_CONTRACT - also gets tokens 
-        testAccounts[1] = ANVIL_ACCOUNT_6;
-        testAccounts[2] = ANVIL_ACCOUNT_7;
-        testAccounts[3] = ANVIL_ACCOUNT_8;
-        testAccounts[4] = ANVIL_ACCOUNT_9;
-
-        console.log("Minting MRT tokens to test accounts...");
-        for (uint256 i = 0; i < testAccounts.length; i++) {
-            mrtToken.mint(testAccounts[i], 10000 ether);
-            console.log("Minted 10000 MRT to account: ", testAccounts[i]);
-        }
-
-        // 8. Note: No need to send ETH to the addresses since Anvil accounts all have 10000 ETH by default
-        console.log("All Anvil accounts already have 10000 ETH by default");
 
         console.log("Deployment completed successfully!");
         vm.stopBroadcast();
