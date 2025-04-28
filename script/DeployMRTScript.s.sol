@@ -23,7 +23,7 @@ contract DeployMRTScript is Script {
     address private constant ANVIL_ACCOUNT_6 = 0x976EA74026E726554dB657fA54763abd0C3a0aa9;
     address private constant ANVIL_ACCOUNT_7 = 0x14dC79964da2C08b23698B3D3cc7Ca32193d9955;
     address private constant ANVIL_ACCOUNT_8 = 0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f;
-    address private constant ANVIL_ACCOUNT_9 = 0xa0Ee7A142d267C1f36714E4a8F75612F20a79720;
+    address private constant ANVIL_ACCOUNT_9 = 0xFa63Dc8B500dD91F7342c9dB60d0fe16f173676f;
     
     // Role assignments
     address private constant DEPLOYER = ANVIL_ACCOUNT_0;
@@ -44,12 +44,13 @@ contract DeployMRTScript is Script {
     uint96 private constant ROYALTY_PERCENTAGE = 500; // 5%
     
     // Presale configuration
-    uint256 private constant MAX_SUPPLY = 1000;
-    uint256 private constant BASE_PRICE = 0.05 ether;
-    uint256 private constant MRT_BASE_PRICE = 5000 ether; // Mock MRT amount (with 18 decimals)
-    uint256 private constant PRICE_INCREASE_RATE = 0.001 ether;
-    uint256 private constant MRT_PRICE_INCREASE_RATE = 10 ether;
-    uint256 private constant MAX_PER_ADDRESS = 10;
+    uint256 private constant START_TIME = 1745860551 +  6 hours;
+    uint256 private constant END_TIME = 1745860551 + 10 days;
+    uint256 private constant MAX_SUPPLY = 10000;
+    uint256 private constant BASE_PRICE = 0.0001 ether;
+    uint256 private constant MRT_BASE_PRICE = 25_000 ether; // Mock MRT amount (with 18 decimals)
+    uint256 private constant USDT_BASE_PRICE = 200 ether;
+    uint256 private constant MAX_PER_ADDRESS = 5;
 
     function run() external {
         // For Anvil, we can use the default private key of account 0
@@ -61,7 +62,8 @@ contract DeployMRTScript is Script {
         console.log("Deploying mock MRT token...");
         mrtToken = new ERC20Mock();
         // Initialize with name, symbol, and initial supply to deployer
-        mrtToken.mint(ANVIL_ACCOUNT_0, 10000000 ether);
+        mrtToken.mint(ANVIL_ACCOUNT_0, 100000000 ether);
+        mrtToken.mint(ANVIL_ACCOUNT_9, 100000000 ether);
         console.log("MRT Token deployed at: ", address(mrtToken));
 
         // 2. Deploy NFT Collection
@@ -107,14 +109,14 @@ contract DeployMRTScript is Script {
         // 6. Create a public presale
         console.log("Creating public presale...");
         uint256 presaleId = presaleContract.createPresale(
-            block.timestamp + 100,
-            block.timestamp + 10000000,
+            START_TIME,
+            END_TIME, 
             MAX_SUPPLY,
             BASE_PRICE,
             MRT_BASE_PRICE,
-            0, // USDT price set to 0 as we're not using USDT
-            PRICE_INCREASE_RATE,
-            MRT_PRICE_INCREASE_RATE,
+            USDT_BASE_PRICE, // USDT price set to 0 as we're not using USDT
+            0,
+            0,
             0, // USDT price increase rate set to 0
             bytes32(0), // No merkle root needed for public sale
             MAX_PER_ADDRESS,

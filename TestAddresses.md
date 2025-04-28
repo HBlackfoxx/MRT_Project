@@ -1,0 +1,4 @@
+  MRT Token deployed at:  0x9Db2a09266140315B5d408391c75B06A67929c59
+  NFT Collection deployed at:  0xB2B8d512577A0A805D426515589993a735F73Cb8
+  Presale Contract deployed at:  0xc483362ce7042B300CF86957b1E549D05FFC34A5
+  Sepolia testnet
